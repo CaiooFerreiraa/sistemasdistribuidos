@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -18,6 +19,20 @@ RELEASE_DELAY_SECONDS = int(os.getenv("RELEASE_DELAY_SECONDS", "60"))
 RETRY_AFTER_ERROR_SECONDS = int(os.getenv("RETRY_AFTER_ERROR_SECONDS", "5"))
 LOGS_DIR = Path(__file__).resolve().parents[1] / "logs"
 LOGS_DIR.mkdir(exist_ok=True)
+SNAPSHOT_FILE = LOGS_DIR / "published_snapshot.json"
+
+
+def _write_snapshot(snapshot: dict[str, Any]) -> None:
+    SNAPSHOT_FILE.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _read_snapshot() -> dict[str, Any] | None:
+    if not SNAPSHOT_FILE.exists():
+        return None
+    try:
+        return json.loads(SNAPSHOT_FILE.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
 
 
 logger = logging.getLogger("temperature-delayed-replica")
@@ -110,6 +125,7 @@ class DelayedReplicaState:
             snapshot["replica_published_at"] = now.isoformat()
             snapshot["replica_delay_seconds"] = RELEASE_DELAY_SECONDS
             self.published_snapshot = snapshot
+            _write_snapshot(snapshot)
             logger.info(
                 "Snapshot publicado pela replica: temperatura=%s°C observado_em=%s puxado_em=%s publicado_em=%s",
                 snapshot.get("temperature_celsius"),
@@ -124,7 +140,7 @@ class DelayedReplicaState:
             "queued_items": len(self.queue),
             "last_pull_at": self.last_pull_at,
             "last_error": self.last_error,
-            "has_published_snapshot": self.published_snapshot is not None,
+            "has_published_snapshot": _read_snapshot() is not None,
         }
 
 
@@ -171,24 +187,25 @@ async def health() -> dict[str, Any]:
 @app.get("/temperature/latest")
 async def temperature_latest() -> dict[str, Any]:
     state._promote_ready_snapshots()
-    if not state.published_snapshot:
+    snapshot = _read_snapshot()
+    if not snapshot:
         raise HTTPException(
             status_code=503,
             detail="A replica ainda nao publicou um dado. Aguarde pelo menos 1 minuto apos a inicializacao.",
         )
-    return state.published_snapshot
+    return snapshot
 
 
 @app.get("/payload")
 async def payload() -> dict[str, Any]:
     state._promote_ready_snapshots()
-    if not state.published_snapshot:
+    snapshot = _read_snapshot()
+    if not snapshot:
         raise HTTPException(
             status_code=503,
             detail="A replica ainda nao publicou um dado. Aguarde pelo menos 1 minuto apos a inicializacao.",
         )
 
-    snapshot = state.published_snapshot
     return {
         "city": snapshot.get("city"),
         "country": snapshot.get("country"),
@@ -204,7 +221,7 @@ async def payload() -> dict[str, Any]:
 @app.get("/temperature/pipeline")
 async def temperature_pipeline() -> dict[str, Any]:
     return {
-        "published_snapshot": state.published_snapshot,
+        "published_snapshot": _read_snapshot(),
         "queue": state.queue,
         "status": state.queue_status(),
     }

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -18,6 +19,20 @@ COUNTRY_CODE = os.getenv("COUNTRY_CODE", "BR")
 POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL_SECONDS", "15"))
 LOGS_DIR = Path(__file__).resolve().parents[1] / "logs"
 LOGS_DIR.mkdir(exist_ok=True)
+SNAPSHOT_FILE = LOGS_DIR / "latest_snapshot.json"
+
+
+def _write_snapshot(snapshot: dict[str, Any]) -> None:
+    SNAPSHOT_FILE.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _read_snapshot() -> dict[str, Any] | None:
+    if not SNAPSHOT_FILE.exists():
+        return None
+    try:
+        return json.loads(SNAPSHOT_FILE.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
 
 
 logger = logging.getLogger("temperature-source")
@@ -87,6 +102,7 @@ class SourceState:
         self.latest_snapshot = snapshot
         self.last_poll_at = fetched_at
         self.last_error = None
+        _write_snapshot(snapshot)
         logger.info(
             "Temperatura atualizada: cidade=%s temperatura=%s°C observado_em=%s coletado_em=%s",
             snapshot["city"],
@@ -129,7 +145,7 @@ async def root() -> dict[str, Any]:
 @app.get("/health")
 async def health() -> dict[str, Any]:
     return {
-        "status": "ok" if state.latest_snapshot else "starting",
+        "status": "ok" if _read_snapshot() else "starting",
         "city": CITY_NAME,
         "last_poll_at": state.last_poll_at,
         "last_error": state.last_error,
@@ -138,6 +154,7 @@ async def health() -> dict[str, Any]:
 
 @app.get("/temperature/latest")
 async def temperature_latest() -> dict[str, Any]:
-    if not state.latest_snapshot:
+    snapshot = _read_snapshot()
+    if not snapshot:
         raise HTTPException(status_code=503, detail="Aguardando a primeira leitura da temperatura.")
-    return state.latest_snapshot
+    return snapshot
